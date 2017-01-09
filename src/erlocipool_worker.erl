@@ -6,7 +6,8 @@
 -record(session, {ssn, monitor, openStmts = 0, closedStmts = 0}).
 -record(state, {name, type, owner, ociOpts, logFun, tns, usr, passwd,
                 sessMin = 0, sessMax = 0, stmtMax = 0, lastError, upTh = 0,
-                shares = [], sessions = [] :: #session{}, downTh = 0}).
+                shares = [], sessions = [] :: #session{}, downTh = 0,
+                pingTimeout = 0}).
 
 % supervisor interface
 -export([start_link/6]).
@@ -64,13 +65,19 @@ init([Name, Owner, Tns, User, Password, Opts]) ->
            DownThreshHold < 100.0 andalso DownThreshHold < UpThreshHold -> ok;
            true -> exit({invalid, down_th}) end,
 
+        PingTimeout = proplists:get_value(ping_timeout, Opts, 0),
+        if is_number(PingTimeout) andalso PingTimeout > 1000 ->
+                erlang:send_after(PingTimeout, self(), check_sessions);
+           PingTimeout == 0 -> ok;
+           true -> exit({invalid, ping_timeout}) end,
+
         self() ! {build_pool, MinSessions},
         process_flag(trap_exit, true),
         {ok, #state{name = Name, type = Type, owner = Owner, ociOpts = OciOpts,
                     logFun = LogFun, tns = Tns, usr = User, passwd = Password,
                     sessMin = MinSessions, sessMax = MaxSessions,
                     stmtMax = MaxStmtsPerSession, upTh = UpThreshHold,
-                    downTh = DownThreshHold}}
+                    downTh = DownThreshHold, pingTimeout = PingTimeout}}
     catch
         _:Reason -> {stop, Reason}
     end.
@@ -274,16 +281,20 @@ handle_cast({kill, #session{
             State) ->
     try
         true = demonitor(OciMon, [flush]),
-        OciPort = {oci_port, PortPid},
-        ok = OciPort:close()
+        case rpc:call(node(PortPid), erlang, is_process_alive, [PortPid]) of
+            true ->
+                OciPort = {oci_port, PortPid},
+                ok = OciPort:close();
+            _ -> no_op
+        end
     catch
         _:Reason ->
             ?DBG("handle_cast(kill)", "error ~p~n~p",
                  [Reason, erlang:get_stacktrace()])
     end,
-    self() ! {build_pool, State#state.sessMin - length(State#state.sessions)},
-    {noreply, State#state{
-                sessions = sort_sessions(State#state.sessions -- [Session])}};
+    NewSessions = State#state.sessions -- [Session],
+    self() ! {build_pool, State#state.sessMin - length(NewSessions)},
+    {noreply, State#state{sessions = sort_sessions(NewSessions)}};
 handle_cast({check, {PortPid, OciSessnHandle, _OciStmtHandle}}, State) ->
     Self = self(),
     spawn(fun() ->
@@ -303,6 +314,22 @@ handle_cast({check, {PortPid, OciSessnHandle, _OciStmtHandle}}, State) ->
 handle_cast(_Request, State) ->
     {noreply, State}.
 
+handle_info(check_sessions, #state{pingTimeout = 0} = State) ->
+    {noreply, State};
+handle_info(check_sessions, #state{sessions = Sessions} = State) ->
+    Self = self(),
+    lists:map(
+        fun(#session{ssn = Session} = S) ->
+            spawn(
+                fun() ->
+                    case catch Session:ping() of
+                        ok -> ok;
+                        _Error -> gen_server:cast(Self, {kill, S})
+                    end
+                end)
+        end, Sessions),
+    erlang:send_after(State#state.pingTimeout, Self, check_sessions),
+    {noreply, State};
 handle_info({check_reduce, ToClose},
             #state{sessions =
                    [#session{ssn = {oci_port, PortPid, _} = OciSession,
@@ -355,6 +382,18 @@ handle_info({build_pool, N}, State) ->
             self() ! {build_pool, N},
             {noreply, State#state{lastError = undefined}}
     end;
+handle_info({'EXIT', Pid, Reason}, State) ->
+    {noreply, State};
+handle_info({'DOWN', MonRef, process, _OciPortPid, Reason}, 
+            #state{sessions = Sessions} = State) ->
+    NewSessions =
+    case [S || #session{monitor = OciMon} = S <- Sessions, OciMon == MonRef] of
+        [Sess] -> lists:delete(Sess, Sessions);
+        _ -> Sessions
+    end,
+    self() ! {build_pool, State#state.sessMin - length(NewSessions)},
+    {noreply, State#state{sessions = NewSessions}};
+
 handle_info(_Info, State) ->
     {noreply, State}.
 
