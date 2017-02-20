@@ -11,11 +11,9 @@
 -define(USER, <<"scott">>).
 -define(PASSWORD, <<"regit">>).
 
-logfun(_Log) -> ok.
 -define(USINGPOOL(__Name, __Opts, __Body),
         (fun() ->
-                 {ok, Pool} = erlocipool:new(__Name, ?TNS, ?USER, ?PASSWORD,
-                                             [{logfun, fun logfun/1}|__Opts]),
+                 {ok, Pool} = erlocipool:new(__Name, ?TNS, ?USER, ?PASSWORD, __Opts),
                  (fun Sessions() ->
                     case Pool:get_stats() of
                         [] ->
@@ -123,18 +121,17 @@ pool_test_() ->
                 OciPort = erloci:new(
                             [{logging, true},
                              {env, [{"NLS_LANG",
-                                     "GERMAN_SWITZERLAND.AL32UTF8"}]}],
-                            fun logfun/1),
+                                     "GERMAN_SWITZERLAND.AL32UTF8"}]}]),
                 OciSession = OciPort:get_session(?TNS, ?USER, ?PASSWORD),
                 Stmt = OciSession:prep_sql(?SESSSQL),
                 {cols, _} = Stmt:exec_stmt(),
                 {{rows, SessBeforePool}, true} = Stmt:fetch_rows(10000),
                 ok = Stmt:close(),
                 {ok, Pool} = erlocipool:new(test_pub, ?TNS, ?USER, ?PASSWORD,
-                                        [{logfun, fun logfun/1},
-                                         {type, public}, {sess_min, 2},
+                                        [{type, public}, {sess_min, 2},
                                          {sess_max, 4}, {stmt_max, 1},
-                                         {up_th, 50}, {down_th, 40}]),
+                                         {up_th, 50}, {down_th, 40},
+                                         {ociOpts, [{ping_timeout, 1000}]}]),
                 timer:sleep(500),
                 {Pool, OciPort, OciSession, SessBeforePool}
         end,
@@ -156,7 +153,9 @@ pool_test_() ->
                 ?assertEqual(ok, OciPort:close()),
                 ?assertEqual(ok, application:stop(erloci))
         end,
-        {with, [fun saturate_recover/1, fun bad_conn_recover/1]}
+        {with, [fun saturate_recover/1,
+                fun bad_conn_recover/1
+               ]}
     }}.
 
 saturate_recover({Pool, _OciPort, _OciSession, _SessBefore}) ->
@@ -196,8 +195,10 @@ bad_conn_recover({Pool, _OciPort, OciSession, SessBefore}) ->
     ?assertMatch([{_,0,2},{_,1,1}], Pool:get_stats()),
     {PoolSessns, _} = current_pool_session_ids(OciSession, SessBefore),
     ?assertEqual(ok, srv_kill_sessions(PoolSessns, OciSession)),
+    timer:sleep(2000),
     ?assertMatch({error, _}, S:exec_stmt()),
-    ?assertMatch([{_,0,2},{_,1,1}], Pool:get_stats()).
+    %% Pool replenished with new sessions
+    ?assertMatch([{_,0,0},{_,0,0}], Pool:get_stats()).
 
 %------------------------
 % Library functions
@@ -231,6 +232,6 @@ stmts(Pool, N) -> stmts(Pool, N, []).
 stmts(_Pool, 0, Acc) -> lists:reverse(Acc);
 stmts(Pool, N, Acc) when N > 0 ->
     {ok, Stmt} = Pool:prep_sql(<<"select * from dual">>),
-    ?assertEqual({cols, [{<<"DUMMY">>,'SQLT_CHR',1,0,0}]}, Stmt:exec_stmt()),
+    ?assertEqual({cols, [{<<"DUMMY">>,'SQLT_CHR',2,0,0}]}, Stmt:exec_stmt()),
     ?assertEqual({{rows, [[<<"X">>]]}, true}, Stmt:fetch_rows(2)),
     stmts(Pool, N-1, [Stmt | Acc]).
