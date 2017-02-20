@@ -274,12 +274,8 @@ handle_cast({kill, #session{
             State) ->
     try
         true = demonitor(OciMon, [flush]),
-        case rpc:call(node(PortPid), erlang, is_process_alive, [PortPid]) of
-            true ->
-                OciPort = {oci_port, PortPid},
-                ok = OciPort:close();
-            _ -> no_op
-        end
+        OciPort = {oci_port, PortPid},
+        ok = OciPort:close()
     catch
         _:Reason ->
             ?DBG("handle_cast(kill)", "error ~p~n~p",

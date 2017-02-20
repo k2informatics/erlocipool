@@ -112,7 +112,8 @@ fetch_data(_) ->
 -define(SESSSQL,
         <<"select '' || s.sid || ',' || s.serial# from gv$session s join "
           "gv$process p on p.addr = s.paddr and p.inst_id = s.inst_id where "
-          "s.type != 'BACKGROUND' and s.program = 'ocierl.exe'">>).
+          "s.type != 'BACKGROUND' and "
+          "(s.program = 'ocierl.exe' or s.program like 'ocierl%')">>).
 pool_test_() ->
     {timeout, 60, {
         setup,
@@ -136,6 +137,7 @@ pool_test_() ->
                 {Pool, OciPort, OciSession, SessBeforePool}
         end,
         fun({Pool, OciPort, OciSession, SessBeforePool}) ->
+                ?assertEqual(ok, erlocipool:del(test_pub)),
                 {PoolSessns, SessAfterPool}
                 = current_pool_session_ids(OciSession, SessBeforePool),
                 ?debugFmt("Pool : ~p~nSessBeforePool : ~p~n"
@@ -143,7 +145,6 @@ pool_test_() ->
                           [Pool, lists:flatten(SessBeforePool),
                            lists:flatten(SessAfterPool), PoolSessns]),
                 ?assertEqual(ok, application:stop(erlocipool)),
-                ?assertEqual(ok, srv_kill_sessions(PoolSessns, OciSession)),
                 Stmt1 = OciSession:prep_sql(?SESSSQL),
                 ?assertMatch({cols, _}, Stmt1:exec_stmt()),
                 ?assertEqual({{rows, SessBeforePool}, true},
