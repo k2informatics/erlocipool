@@ -218,7 +218,7 @@ handle_cast({check, {PortPid, OciSessnHandle, _OciStmtHandle}}, State) ->
                   %?DBG("OciSession:ping()", "session ~p",
                   %     [{PortPid, OciSessnHandle}]),
                   case catch OciSession:ping() of
-                      ok -> ok;
+                      pong -> ok;
                       _Error ->
                           kill(Self, PortPid, OciSessnHandle,
                                State#state.sessions)
