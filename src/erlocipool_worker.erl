@@ -220,7 +220,6 @@ handle_cast({check, {PortPid, OciSessnHandle, _OciStmtHandle}}, State) ->
                   case catch OciSession:ping() of
                       pong -> ok;
                       _Error ->
-                          self() ! {build_pool, 1},
                           kill(Self, PortPid, OciSessnHandle,
                                State#state.sessions)
                   end
