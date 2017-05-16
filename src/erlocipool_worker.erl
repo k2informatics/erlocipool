@@ -116,6 +116,9 @@ handle_call({stmt, Pid, {PortPid, OciSessnHandle, OciStmtHandle}}, From, State) 
             end
     end;
 handle_call({prep_sql, Pid, Sql}, From, State) ->
+    Ref = erlang:make_ref(),
+    handle_call({prep_sql, Pid, Sql, Ref}, From, State);
+handle_call({prep_sql, Pid, Sql, Ref}, From, State) ->
     case handle_call({has_access, Pid}, From, State) of
         {reply, false, State1} ->
             {reply, {error, private}, State1};
@@ -123,8 +126,8 @@ handle_call({prep_sql, Pid, Sql}, From, State) ->
             if length(State1#state.sessions) == 0 ->
                    {reply, {error, no_session}, State1};
                true ->
-                   {Statement, State2} = prep_sql(Sql, State1),
-                   {reply, Statement, State2}
+                   {Result, State2} = prep_sql(Ref, Sql, State1),
+                   {reply, Result, State2}
             end
     end;
 handle_call({close, Pid, {PortPid, OciSessnHandle, OciStmtHandle}}, From, State) ->
@@ -270,6 +273,31 @@ handle_info({build_pool, N}, #state{lastError = undefined} = State) ->
 handle_info({build_pool, N}, State) ->
     self() ! {build_pool, N},
     {noreply, State#state{lastError = undefined}};
+handle_info({build_stmts, MonRef}, #state{sessions = Sessions} = State) when length(Sessions) == 0 ->
+    erlang:send_after(?DELAY_RETRY_AFTER_ERROR, self(), {build_stmts, MonRef}),
+    {noreply, State};
+handle_info({build_stmts, MonRef}, State) ->
+    OldStmts = ets:select(?POOL_TAB, [{#stmt_info{mon_ref = '$1', _ = '_'}, [{'==', '$1', MonRef}], ['$_']}]),
+    io:format("####### build stmts : ~p", [MonRef]),
+    io:format("####### build stmts : ~p", [length(OldStmts)]),
+    Results = lists:usrot(lists:map(
+        fun(#stmt_info{id = Ref, query = Sql, binds = undefined}) ->
+            case prep_sql(Ref, Sql, State) of
+                {ok, _} -> true;
+                _ -> false
+            end;
+           (#stmt_info{id = Ref, query = Sql, binds = Binds}) ->
+            case prep_sql(Ref, Sql, State) of
+                {ok, _} ->
+                    erlocipool:bind_vars(Binds, {erlocipool, State#state.name, Ref}),
+                    true;
+                _ -> false
+            end
+        end, OldStmts)),
+    if Results == [true] -> no_op;
+       true -> erlang:send_after(?DELAY_RETRY_AFTER_ERROR, self(), {build_stmts, MonRef})
+    end,
+    {noreply, State};
 handle_info({'EXIT', Pid, Reason}, State) ->
     ?DBG("Got Exit", "For ~p Reason : ~p", [Pid, Reason]),
     {noreply, State};
@@ -283,11 +311,14 @@ handle_info({'DOWN', MonRef, process, _OciPortPid, _Reason},
     end,
     % #10 : replace with a new sesion immediately
     self() ! {build_pool, 1},
+    self() ! {build_stmts, MonRef},
     {noreply, State#state{sessions = NewSessions}};
 handle_info(_Info, State) ->
     {noreply, State}.
 
-terminate(_Reason, #state{sessions = Sessions}) ->
+terminate(_Reason, #state{sessions = Sessions, name = Name}) ->
+    ets:select_delete(?POOL_TAB, [{#stmt_info{pool = '$1', _ = '_'}, 
+                                    [{'==', '$1', Name}], [true]}]),
     [begin
          OciPort = {oci_port, PortPid},
          catch OciPort:close()
@@ -373,18 +404,21 @@ pick_session(#state{sessions = Sessions, sessMin = MinSess, sessMax = MaxSess,
             {ok, Session, State}
     end.
 
--spec prep_sql(Sql :: binary(), State :: #state{}) ->
+-spec prep_sql(Ref :: reference(), Sql :: binary(), State :: #state{}) ->
     {{ok, Statement :: tuple()} | {error, any()}, Sessions :: [#session{}]}.
-prep_sql(Sql, #state{} = State) ->
+prep_sql(Ref, Sql, #state{name = PoolName} = State) ->
     case pick_session(State) of
-        {ok, #session{ssn = {oci_port, _, OciSessionHandle} = OciSsn} = Session,
+        {ok, #session{ssn = {oci_port, _, OciSessionHandle} = OciSsn, monitor = MonRef} = Session,
          NewState} ->
             case OciSsn:prep_sql(Sql) of
                 {oci_port, statement, PortPid, OciSessionHandle,
                  OciStatementHandle} ->
                     %?DBG("prep_sql", "sql ~p, statement ~p",
                     %[Sql, OciStatementHandle]),
-                    {{ok, {PortPid, OciSessionHandle, OciStatementHandle}},
+                    ets:insert(?POOL_TAB, #stmt_info{id = Ref, query = Sql,
+                                                     mon_ref = MonRef, pool = PoolName,
+                                                     handle = {PortPid, OciSessionHandle, OciStatementHandle}}),
+                    {{ok, Ref},
                      NewState#state{
                        sessions = sort_sessions(
                                     [Session#session{
@@ -400,7 +434,7 @@ prep_sql(Sql, #state{} = State) ->
                             ?DBG("prep_sql", "sql ~p, statement ~p~n", [Sql, Other]),
                             {{error, Other}, NewState};
                         OtherSessions ->
-                            prep_sql(Sql, State#state{sessions = OtherSessions})
+                            prep_sql(Ref, Sql, State#state{sessions = OtherSessions})
                     end
             end;
         {error, Error} ->

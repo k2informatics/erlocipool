@@ -19,9 +19,11 @@
 
 -define(POOL_TAB, erlocipool_table).
 
--record(stmt_info, {id :: reference(),
-                    query :: binary(),
-                    binds :: list(),
-                    handle :: tuple()}).
+-record(stmt_info, {id      :: reference(),
+                    pool    :: atom(),
+                    query   :: binary(),
+                    binds   :: list(),
+                    mon_ref :: reference(),
+                    handle  :: tuple()}).
 
 -endif. % ERLOCIPOOL_HRL

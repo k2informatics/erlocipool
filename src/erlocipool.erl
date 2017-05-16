@@ -95,9 +95,7 @@ has_access(PidOrName) -> gen_server:call(PidOrName, {has_access, self()}).
 % lead to a cleanup if session is dead
 prep_sql(Sql, {?MODULE, PidOrName}) when is_binary(Sql) ->
     case gen_server:call(PidOrName, {prep_sql, self(), Sql}, infinity) of
-        {ok, Stmt} ->
-            Ref = erlang:make_ref(),
-            ets:insert(?POOL_TAB, #stmt_info{id = Ref, query = Sql, handle = Stmt}),
+        {ok, Ref} ->
             {ok, {?MODULE, PidOrName, Ref}};
         Other -> Other
     end;
