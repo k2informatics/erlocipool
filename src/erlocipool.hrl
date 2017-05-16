@@ -17,4 +17,11 @@
        ).
 -define(DBG(__Fun,__F), ?DBG(__Fun,__F,[])).
 
+-define(POOL_TAB, erlocipool_table).
+
+-record(stmt_info, {id :: reference(),
+                    query :: binary(),
+                    binds :: list(),
+                    handle :: tuple()}).
+
 -endif. % ERLOCIPOOL_HRL

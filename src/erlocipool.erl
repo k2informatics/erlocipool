@@ -3,6 +3,8 @@
 -behaviour(application).
 -behaviour(supervisor).
 
+-include("erlocipool.hrl").
+
 %% Create/destroy Pool APIs
 -export([new/5, del/1]).
 
@@ -28,6 +30,7 @@
 
 start() ->
     application:start(erloci),
+    ets:new(?POOL_TAB, [public, named_table, {keypos,2}]),
     application:start(?MODULE).
 
 stop() ->
@@ -92,49 +95,61 @@ has_access(PidOrName) -> gen_server:call(PidOrName, {has_access, self()}).
 % lead to a cleanup if session is dead
 prep_sql(Sql, {?MODULE, PidOrName}) when is_binary(Sql) ->
     case gen_server:call(PidOrName, {prep_sql, self(), Sql}, infinity) of
-        {ok, Stmt} -> {ok, {?MODULE, PidOrName, Stmt}};
+        {ok, Stmt} ->
+            Ref = erlang:make_ref(),
+            ets:insert(?POOL_TAB, #stmt_info{id = Ref, query = Sql, handle = Stmt}),
+            {ok, {?MODULE, PidOrName, Ref}};
         Other -> Other
     end;
 prep_sql(PidOrName, Sql) when is_binary(Sql) -> prep_sql(Sql, {?MODULE, PidOrName}).
 
-close({?MODULE, PidOrName, Stmt}) ->
-    gen_server:call(PidOrName, {close, self(), Stmt}).
+close({?MODULE, PidOrName, Ref}) ->
+    case fetch_stmt(Ref) of
+        none -> ok;
+        Stmt ->
+            ets:delete(?POOL_TAB, Ref),
+            gen_server:call(PidOrName, {close, self(), Stmt})
+    end.
 
 %
 % Statement internal APIs
 %
-bind_vars(BindVars, {?MODULE, PidOrName, Stmt}) ->
-    stmt_op(PidOrName, Stmt, bind_vars, [BindVars]).
-lob(LobHandle, Offset, Length, {?MODULE, PidOrName, Stmt}) ->
-    stmt_op(PidOrName, Stmt, lob, [LobHandle, Offset, Length]).
+bind_vars(BindVars, {?MODULE, PidOrName, Ref}) ->
+    stmt_op(PidOrName, Ref, bind_vars, [BindVars]).
+lob(LobHandle, Offset, Length, {?MODULE, PidOrName, Ref}) ->
+    stmt_op(PidOrName, Ref, lob, [LobHandle, Offset, Length]).
 
-exec_stmt({?MODULE, PidOrName, Stmt}) ->
-    stmt_op(PidOrName, Stmt, exec_stmt, []).
-exec_stmt(BindVars, {?MODULE, PidOrName, Stmt}) ->
-    stmt_op(PidOrName, Stmt, exec_stmt, [BindVars]).
+exec_stmt({?MODULE, PidOrName, Ref}) ->
+    stmt_op(PidOrName, Ref, exec_stmt, []).
+exec_stmt(BindVars, {?MODULE, PidOrName, Ref}) ->
+    stmt_op(PidOrName, Ref, exec_stmt, [BindVars]).
 %exec_stmt(BindVars, AutoCommit, {?MODULE, PidOrName, Stmt}) ->
 %    stmt_op(PidOrName, Stmt, exec_stmt, [BindVars, AutoCommit]).
 
-fetch_rows(Count, {?MODULE, PidOrName, Stmt}) ->
-    stmt_op(PidOrName, Stmt, fetch_rows, [Count]).
+fetch_rows(Count, {?MODULE, PidOrName, Ref}) ->
+    stmt_op(PidOrName, Ref, fetch_rows, [Count]).
 
 
 % some errors from statement level APIs lob, exec_stmt, fetch_rows may result
 % because of a closing/closed connection. So all the error paths triggters a
 % session ping in pool which might lead to a cleanup if session is dead
-stmt_op(PidOrName, Stmt, Op, Args) ->
-    case gen_server:call(PidOrName, {stmt, self(), Stmt}) of
-        {ok, ErlOciStmt} ->
-            case apply(ErlOciStmt, Op, Args) of
-                {error, {OraCode, _}} = Error when is_integer(OraCode) ->
-                    gen_server:cast(PidOrName, {check, Stmt, OraCode}),
-                    Error;
-                {error, _} = Error ->
-                    gen_server:cast(PidOrName, {check, Stmt}),
-                    Error;
+stmt_op(PidOrName, Ref, Op, Args) ->
+    case fetch_stmt(Ref) of
+        none -> error(stmt_not_found);
+        Stmt ->
+            case gen_server:call(PidOrName, {stmt, self(), Stmt}) of
+                {ok, ErlOciStmt} ->
+                    case apply(ErlOciStmt, Op, Args) of
+                        {error, {OraCode, _}} = Error when is_integer(OraCode) ->
+                            gen_server:cast(PidOrName, {check, Stmt, OraCode}),
+                            Error;
+                        {error, _} = Error ->
+                            gen_server:cast(PidOrName, {check, Stmt}),
+                            Error;
+                        Other -> Other
+                    end;
                 Other -> Other
-            end;
-        Other -> Other
+            end
     end.
 
 %% ===================================================================
@@ -146,4 +161,10 @@ loginfo({Level,ModStr,FunStr,Line,MsgStr}) ->
         info ->
             io:format("[~p] {~s,~s,~p} ~s~n", [Level,ModStr,FunStr,Line,MsgStr]);
         _ -> ok
+    end.
+
+fetch_stmt(Ref) ->
+    case ets:lookup(?POOL_TAB, Ref) of
+        [] -> none;
+        [#stmt_info{handle = Stmt}] -> Stmt
     end.
