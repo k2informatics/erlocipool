@@ -30,7 +30,6 @@
 
 start() ->
     application:start(erloci),
-    ets:new(?POOL_TAB, [public, named_table, {keypos,2}]),
     application:start(?MODULE).
 
 stop() ->
@@ -38,13 +37,16 @@ stop() ->
     application:stop(erloci).
 
 start(_StartType, _StartArgs) -> start_link().
-stop(_State) -> ok.
+stop(_State) -> 
+    ets:delete(?POOL_TAB),
+    ok.
 
 %% ===================================================================
 %% Supervisor API functions
 %% ===================================================================
 
 start_link() ->
+    ets:new(?POOL_TAB, [public, named_table, {keypos,2}]),
     supervisor:start_link({local, ?SUPNAME}, ?MODULE, []).
 
 %% ===================================================================

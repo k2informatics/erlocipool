@@ -278,26 +278,25 @@ handle_info({build_stmts, MonRef}, #state{sessions = Sessions} = State) when len
     {noreply, State};
 handle_info({build_stmts, MonRef}, State) ->
     OldStmts = ets:select(?POOL_TAB, [{#stmt_info{mon_ref = '$1', _ = '_'}, [{'==', '$1', MonRef}], ['$_']}]),
-    io:format("####### build stmts : ~p", [MonRef]),
-    io:format("####### build stmts : ~p", [length(OldStmts)]),
-    Results = lists:usrot(lists:map(
-        fun(#stmt_info{id = Ref, query = Sql, binds = undefined}) ->
-            case prep_sql(Ref, Sql, State) of
-                {ok, _} -> true;
-                _ -> false
+    {Results, NextState} = lists:mapfoldl(
+        fun(#stmt_info{id = Ref, query = Sql, binds = undefined}, AccState) ->
+            case prep_sql(Ref, Sql, AccState) of
+                {{ok, _}, NewSate} -> {true, NewSate};
+                {{error, _}, NewSate} -> {false, NewSate}
             end;
-           (#stmt_info{id = Ref, query = Sql, binds = Binds}) ->
-            case prep_sql(Ref, Sql, State) of
-                {ok, _} ->
+           (#stmt_info{id = Ref, query = Sql, binds = Binds}, AccState) ->
+            case prep_sql(Ref, Sql, AccState) of
+                {{ok, _}, NewSate} ->
                     erlocipool:bind_vars(Binds, {erlocipool, State#state.name, Ref}),
-                    true;
-                _ -> false
+                    {true, NewSate};
+                {{error, _}, NewSate} -> {false, NewSate}
             end
-        end, OldStmts)),
-    if Results == [true] -> no_op;
-       true -> erlang:send_after(?DELAY_RETRY_AFTER_ERROR, self(), {build_stmts, MonRef})
+        end, State, OldStmts),
+    case lists:usort(Results) of
+        [true] -> no_op;
+        _ -> erlang:send_after(?DELAY_RETRY_AFTER_ERROR, self(), {build_stmts, MonRef})
     end,
-    {noreply, State};
+    {noreply, NextState};
 handle_info({'EXIT', Pid, Reason}, State) ->
     ?DBG("Got Exit", "For ~p Reason : ~p", [Pid, Reason]),
     {noreply, State};
