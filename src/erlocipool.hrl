@@ -17,10 +17,7 @@
        ).
 -define(DBG(__Fun,__F), ?DBG(__Fun,__F,[])).
 
--define(POOL_TAB, erlocipool_table).
-
 -record(stmt_info, {id      :: reference(),
-                    pool    :: atom(),
                     query   :: binary(),
                     binds   :: list(),
                     mon_ref :: reference(),

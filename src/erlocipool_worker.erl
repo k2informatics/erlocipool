@@ -6,7 +6,7 @@
 -record(session, {ssn, monitor, openStmts = 0, closedStmts = 0}).
 -record(state, {name, type, owner, ociOpts, logFun, tns, usr, passwd,
                 sessMin = 0, sessMax = 0, stmtMax = 0, lastError, upTh = 0,
-                sess_restart_codes = [], shares = [],
+                sess_restart_codes = [], shares = [], tableId,
                 sessions = [] :: #session{}, downTh = 0}).
 
 % supervisor interface
@@ -73,12 +73,13 @@ init([Name, Owner, Tns, User, Password, Opts]) ->
 
         self() ! {build_pool, MinSessions},
         process_flag(trap_exit, true),
+        TableId = ets:new(Name, [public, named_table, {keypos,2}]),
         {ok, #state{name = atom_to_binary(Name, utf8), type = Type, owner = Owner,
                     logFun = LogFun, tns = Tns, usr = User, passwd = Password,
                     sessMin = MinSessions, sessMax = MaxSessions,
                     stmtMax = MaxStmtsPerSession, upTh = UpThreshHold,
                     sess_restart_codes = SessionRestartCodes, ociOpts = OciOpts,
-                    downTh = DownThreshHold}}
+                    downTh = DownThreshHold, tableId = TableId}}
     catch
         _:Reason -> {stop, Reason}
     end.
@@ -130,7 +131,7 @@ handle_call({prep_sql, Pid, Sql, Ref}, From, State) ->
                    {reply, Result, State2}
             end
     end;
-handle_call({close, Pid, {PortPid, OciSessnHandle, OciStmtHandle}}, From, State) ->
+handle_call({close, Pid, Ref}, From, #state{tableId = TableId} = State) ->
     case handle_call({has_access, Pid}, From, State) of
         {reply, false, NewState} ->
             {reply, {error, private}, NewState};
@@ -139,21 +140,26 @@ handle_call({close, Pid, {PortPid, OciSessnHandle, OciStmtHandle}}, From, State)
                 [] ->
                     {reply, {error, no_session}, NewState};
                 Sessions ->
-                    case [{{oci_port, statement, PortPid, OciSessnHandle,
-                           OciStmtHandle}, Session}
-                          || #session{ssn = {oci_port, PP, OSessnH}}
-                             = Session <- Sessions,
-                             OSessnH == OciSessnHandle, PP == PortPid] of
-                        [{Statement, Session}] ->
-                            NewSessions =
-                            [Session#session{
-                               openStmts = Session#session.openStmts - 1,
-                               closedStmts = Session#session.closedStmts + 1}
-                             | Sessions -- [Session]],
-                            {reply, Statement:close(),
-                             NewState#state{sessions = sort_sessions(NewSessions)}};
-                        [] ->
-                            {reply, {error, not_found}, NewState}
+                    case fetch_stmt(TableId, Ref) of
+                        {ok, {PortPid, OciSessnHandle, OciStmtHandle}} ->
+                            ets:delete(TableId, Ref),
+                            case [{{oci_port, statement, PortPid, OciSessnHandle,
+                                   OciStmtHandle}, Session}
+                                  || #session{ssn = {oci_port, PP, OSessnH}}
+                                     = Session <- Sessions,
+                                     OSessnH == OciSessnHandle, PP == PortPid] of
+                                [{Statement, Session}] ->
+                                    NewSessions =
+                                    [Session#session{
+                                       openStmts = Session#session.openStmts - 1,
+                                       closedStmts = Session#session.closedStmts + 1}
+                                     | Sessions -- [Session]],
+                                    {reply, Statement:close(),
+                                     NewState#state{sessions = sort_sessions(NewSessions)}};
+                                [] ->
+                                    {reply, {error, not_found}, NewState}
+                            end;
+                        {error, _} = Error -> {reply, Error, NewState}
                     end
             end
     end;
@@ -179,7 +185,10 @@ handle_call({has_access, Pid}, _From, State) ->
                true -> lists:member(Pid, State#state.shares)
             end
      end, State};
+handle_call({fetch_stmt, Ref}, _From, #state{tableId = TableId} = State) ->
+    {reply, fetch_stmt(TableId, Ref), State};
 handle_call(_Request, _From, State) ->
+    io:format("Request : ~p~n", [_Request]),
     {reply, ok, State}.
 
 handle_cast({kill, #session{
@@ -277,7 +286,7 @@ handle_info({build_stmts, MonRef}, #state{sessions = Sessions} = State) when len
     erlang:send_after(?DELAY_RETRY_AFTER_ERROR, self(), {build_stmts, MonRef}),
     {noreply, State};
 handle_info({build_stmts, MonRef}, State) ->
-    OldStmts = ets:select(?POOL_TAB, [{#stmt_info{mon_ref = '$1', _ = '_'}, [{'==', '$1', MonRef}], ['$_']}]),
+    OldStmts = ets:select(State#state.tableId, [{#stmt_info{mon_ref = '$1', _ = '_'}, [{'==', '$1', MonRef}], ['$_']}]),
     {Results, NextState} = lists:mapfoldl(
         fun(#stmt_info{id = Ref, query = Sql, binds = undefined}, AccState) ->
             case prep_sql(Ref, Sql, AccState) of
@@ -315,9 +324,8 @@ handle_info({'DOWN', MonRef, process, _OciPortPid, _Reason},
 handle_info(_Info, State) ->
     {noreply, State}.
 
-terminate(_Reason, #state{sessions = Sessions, name = Name}) ->
-    ets:select_delete(?POOL_TAB, [{#stmt_info{pool = '$1', _ = '_'}, 
-                                    [{'==', '$1', Name}], [true]}]),
+terminate(_Reason, #state{sessions = Sessions, tableId = TableId}) ->
+    ets:delete(TableId),
     [begin
          OciPort = {oci_port, PortPid},
          catch OciPort:close()
@@ -332,6 +340,12 @@ format_status(_Opt, [_PDict, State]) ->
 %% ===================================================================
 %% private
 %% ===================================================================
+-spec fetch_stmt(integer(), reference()) -> {ok, tuple()} | {error, not_found}.
+fetch_stmt(TableId, Ref) ->
+    case ets:lookup(TableId, Ref) of
+        [] -> {error, not_found};
+        [#stmt_info{handle = Stmt}] -> {ok, Stmt}
+    end.
 
 kill(Self, PortPid, OciSessnHandle, Sessions) ->
     case [S || #session{ssn={oci_port,PP,OSessnH}} = S <- Sessions,
@@ -405,7 +419,7 @@ pick_session(#state{sessions = Sessions, sessMin = MinSess, sessMax = MaxSess,
 
 -spec prep_sql(Ref :: reference(), Sql :: binary(), State :: #state{}) ->
     {{ok, Statement :: tuple()} | {error, any()}, Sessions :: [#session{}]}.
-prep_sql(Ref, Sql, #state{name = PoolName} = State) ->
+prep_sql(Ref, Sql, #state{tableId = TableId} = State) ->
     case pick_session(State) of
         {ok, #session{ssn = {oci_port, _, OciSessionHandle} = OciSsn, monitor = MonRef} = Session,
          NewState} ->
@@ -414,8 +428,8 @@ prep_sql(Ref, Sql, #state{name = PoolName} = State) ->
                  OciStatementHandle} ->
                     %?DBG("prep_sql", "sql ~p, statement ~p",
                     %[Sql, OciStatementHandle]),
-                    ets:insert(?POOL_TAB, #stmt_info{id = Ref, query = Sql,
-                                                     mon_ref = MonRef, pool = PoolName,
+                    ets:insert(TableId, #stmt_info{id = Ref, query = Sql,
+                                                     mon_ref = MonRef, 
                                                      handle = {PortPid, OciSessionHandle, OciStatementHandle}}),
                     {{ok, Ref},
                      NewState#state{

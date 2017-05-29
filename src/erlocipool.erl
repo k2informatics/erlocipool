@@ -37,16 +37,13 @@ stop() ->
     application:stop(erloci).
 
 start(_StartType, _StartArgs) -> start_link().
-stop(_State) -> 
-    ets:delete(?POOL_TAB),
-    ok.
+stop(_State) -> ok.
 
 %% ===================================================================
 %% Supervisor API functions
 %% ===================================================================
 
 start_link() ->
-    ets:new(?POOL_TAB, [public, named_table, {keypos,2}]),
     supervisor:start_link({local, ?SUPNAME}, ?MODULE, []).
 
 %% ===================================================================
@@ -104,12 +101,7 @@ prep_sql(Sql, {?MODULE, PidOrName}) when is_binary(Sql) ->
 prep_sql(PidOrName, Sql) when is_binary(Sql) -> prep_sql(Sql, {?MODULE, PidOrName}).
 
 close({?MODULE, PidOrName, Ref}) ->
-    case fetch_stmt(Ref) of
-        none -> ok;
-        Stmt ->
-            ets:delete(?POOL_TAB, Ref),
-            gen_server:call(PidOrName, {close, self(), Stmt})
-    end.
+    gen_server:call(PidOrName, {close, self(), Ref}).
 
 %
 % Statement internal APIs
@@ -134,10 +126,9 @@ fetch_rows(Count, {?MODULE, PidOrName, Ref}) ->
 % because of a closing/closed connection. So all the error paths triggters a
 % session ping in pool which might lead to a cleanup if session is dead
 stmt_op(PidOrName, Ref, Op, Args) ->
-    case fetch_stmt(Ref) of
-        none -> error(stmt_not_found);
-        Stmt ->
-            case gen_server:call(PidOrName, {stmt, self(), Stmt}) of
+    case gen_server:call(PidOrName, {fetch_stmt, Ref}) of
+        {ok, Stmt} ->
+            case gen_server:call(PidOrName, {stmt, self(), Ref}) of
                 {ok, ErlOciStmt} ->
                     case apply(ErlOciStmt, Op, Args) of
                         {error, {OraCode, _}} = Error when is_integer(OraCode) ->
@@ -149,7 +140,8 @@ stmt_op(PidOrName, Ref, Op, Args) ->
                         Other -> Other
                     end;
                 Other -> Other
-            end
+            end;
+        Error -> Error
     end.
 
 %% ===================================================================
@@ -161,10 +153,4 @@ loginfo({Level,ModStr,FunStr,Line,MsgStr}) ->
         info ->
             io:format("[~p] {~s,~s,~p} ~s~n", [Level,ModStr,FunStr,Line,MsgStr]);
         _ -> ok
-    end.
-
-fetch_stmt(Ref) ->
-    case ets:lookup(?POOL_TAB, Ref) of
-        [] -> none;
-        [#stmt_info{handle = Stmt}] -> Stmt
     end.
