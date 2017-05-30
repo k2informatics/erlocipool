@@ -314,7 +314,7 @@ handle_info({build_stmts, MonRef}, #state{stmts = Stmts} = State) ->
                     erlang:send_after(?DELAY_RETRY_AFTER_ERROR, self(), {build_stmts, MonRef}),
                     NewSate
             end;
-           (Ref, Stmt, AccState) -> io:format("Not down : ~p ~p~n", [Ref, Stmt]), AccState
+           (_Ref, _Stmt, AccState) -> AccState
     end, State, Stmts),
     {noreply, NextState};
 handle_info({'EXIT', Pid, Reason}, State) ->

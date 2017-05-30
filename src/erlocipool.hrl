@@ -17,10 +17,4 @@
        ).
 -define(DBG(__Fun,__F), ?DBG(__Fun,__F,[])).
 
--record(stmt_info, {id      :: reference(),
-                    query   :: binary(),
-                    binds   :: list(),
-                    mon_ref :: reference(),
-                    handle  :: tuple()}).
-
 -endif. % ERLOCIPOOL_HRL
