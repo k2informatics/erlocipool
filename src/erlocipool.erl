@@ -125,22 +125,18 @@ fetch_rows(Count, {?MODULE, PidOrName, Ref}) ->
 % because of a closing/closed connection. So all the error paths triggters a
 % session ping in pool which might lead to a cleanup if session is dead
 stmt_op(PidOrName, Ref, Op, Args) ->
-    case gen_server:call(PidOrName, {fetch_stmt, Ref}) of
-        {ok, Stmt} ->
-            case gen_server:call(PidOrName, {stmt, self(), Stmt}) of
-                {ok, ErlOciStmt} ->
-                    case apply(ErlOciStmt, Op, Args) of
-                        {error, {OraCode, _}} = Error when is_integer(OraCode) ->
-                            gen_server:cast(PidOrName, {check, Stmt, OraCode}),
-                            Error;
-                        {error, _} = Error ->
-                            gen_server:cast(PidOrName, {check, Stmt}),
-                            Error;
-                        Other -> Other
-                    end;
+    case gen_server:call(PidOrName, {stmt, self(), Ref}) of
+        {ok, ErlOciStmt} ->
+            case apply(ErlOciStmt, Op, Args) of
+                {error, {OraCode, _}} = Error when is_integer(OraCode) ->
+                    gen_server:cast(PidOrName, {check, ErlOciStmt, OraCode}),
+                    Error;
+                {error, _} = Error ->
+                    gen_server:cast(PidOrName, {check, ErlOciStmt}),
+                    Error;
                 Other -> Other
             end;
-        Error -> Error
+        Other -> Other
     end.
 
 %% ===================================================================

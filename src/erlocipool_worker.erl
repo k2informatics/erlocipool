@@ -96,7 +96,7 @@ handle_call({sessions, Pid}, From, State) ->
                                  closedStmts = C} <- NewState#state.sessions],
              NewState}
     end;
-handle_call({stmt, Pid, {PortPid, OciSessnHandle, OciStmtHandle}}, From, State) ->
+handle_call({stmt, Pid, Ref}, From, #state{stmts = Stmts} = State) ->
     case handle_call({has_access, Pid}, From, State) of
         {reply, false, NewState} ->
             {reply, {error, private}, NewState};
@@ -105,15 +105,19 @@ handle_call({stmt, Pid, {PortPid, OciSessnHandle, OciStmtHandle}}, From, State) 
                 [] ->
                     {reply, {error, no_session}, NewState};
                 Sessions ->
-                    case [{oci_port, statement, PortPid, OciSessnHandle,
-                           OciStmtHandle}
-                          || #session{ssn = {oci_port, PP, OSessnH}}
-                             <- Sessions, OSessnH == OciSessnHandle,
-                             PP == PortPid] of
-                        [Statement] ->
-                            {reply, {ok, Statement}, NewState};
-                        [] ->
-                            {reply, {error, not_found}, NewState}
+                    case Stmts of
+                        #{Ref := #{stmt := {PortPid, OciSessnHandle, OciStmtHandle}}} ->
+                            case [{oci_port, statement, PortPid, OciSessnHandle,
+                                   OciStmtHandle}
+                                  || #session{ssn = {oci_port, PP, OSessnH}}
+                                     <- Sessions, OSessnH == OciSessnHandle,
+                                     PP == PortPid] of
+                                [Statement] ->
+                                    {reply, {ok, Statement}, NewState};
+                                [] ->
+                                    {reply, {error, not_found}, NewState}
+                            end;
+                        _ -> {reply, {error, not_found}, NewState}
                     end
             end
     end;
@@ -186,12 +190,6 @@ handle_call({has_access, Pid}, _From, State) ->
                true -> lists:member(Pid, State#state.shares)
             end
      end, State};
-handle_call({fetch_stmt, Ref}, _From, #state{stmts = Stmts} = State) ->
-    Resp = case Stmts of
-        #{Ref := #{stmt := Stmt}} -> {ok, Stmt};
-        _ -> {error, not_found}
-    end,
-    {reply, Resp, State};
 handle_call(_Request, _From, State) ->
     {reply, ok, State}.
 
@@ -211,7 +209,7 @@ handle_cast({kill, #session{
     {noreply, State#state{
                 sessions = sort_sessions(State#state.sessions -- [Session])
                }};
-handle_cast({check, {PortPid, OciSessnHandle, _OciStmtHandle} = Stmt, OraCode},
+handle_cast({check, {_, _, PortPid, OciSessnHandle, _OciStmtHandle} = Stmt, OraCode},
             #state{sess_restart_codes = Codes} = State) ->
     case lists:member(OraCode, Codes) of
         true ->
@@ -227,7 +225,7 @@ handle_cast({check, {PortPid, OciSessnHandle, _OciStmtHandle} = Stmt, OraCode},
             gen_server:cast(self(), {check, Stmt})
     end,
     {noreply, State};
-handle_cast({check, {PortPid, OciSessnHandle, _OciStmtHandle}}, State) ->
+handle_cast({check, {_, _, PortPid, OciSessnHandle, _OciStmtHandle}}, State) ->
     Self = self(),
     spawn(fun() ->
                   OciSession = {oci_port, PortPid, OciSessnHandle},
