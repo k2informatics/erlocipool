@@ -6,8 +6,10 @@
 -record(session, {ssn, monitor, openStmts = 0, closedStmts = 0}).
 -record(state, {name, type, owner, ociOpts, logFun, tns, usr, passwd,
                 sessMin = 0, sessMax = 0, stmtMax = 0, lastError, upTh = 0,
-                sess_restart_codes = [], shares = [], tableId,
+                sess_restart_codes = [], shares = [], stmts = #{},
                 sessions = [] :: #session{}, downTh = 0}).
+
+%% stmts = #{make_ref() => #{sql => <<"">>, binds => [], stmt => {oci_port, ...}}, make_ref() => ...}
 
 % supervisor interface
 -export([start_link/6]).
@@ -73,13 +75,12 @@ init([Name, Owner, Tns, User, Password, Opts]) ->
 
         self() ! {build_pool, MinSessions},
         process_flag(trap_exit, true),
-        TableId = ets:new(Name, [public, named_table, {keypos,2}]),
         {ok, #state{name = atom_to_binary(Name, utf8), type = Type, owner = Owner,
                     logFun = LogFun, tns = Tns, usr = User, passwd = Password,
                     sessMin = MinSessions, sessMax = MaxSessions,
                     stmtMax = MaxStmtsPerSession, upTh = UpThreshHold,
                     sess_restart_codes = SessionRestartCodes, ociOpts = OciOpts,
-                    downTh = DownThreshHold, tableId = TableId}}
+                    downTh = DownThreshHold}}
     catch
         _:Reason -> {stop, Reason}
     end.
@@ -131,7 +132,7 @@ handle_call({prep_sql, Pid, Sql, Ref}, From, State) ->
                    {reply, Result, State2}
             end
     end;
-handle_call({close, Pid, Ref}, From, #state{tableId = TableId} = State) ->
+handle_call({close, Pid, Ref}, From, #state{stmts = Stmts} = State) ->
     case handle_call({has_access, Pid}, From, State) of
         {reply, false, NewState} ->
             {reply, {error, private}, NewState};
@@ -140,9 +141,8 @@ handle_call({close, Pid, Ref}, From, #state{tableId = TableId} = State) ->
                 [] ->
                     {reply, {error, no_session}, NewState};
                 Sessions ->
-                    case fetch_stmt(TableId, Ref) of
-                        {ok, {PortPid, OciSessnHandle, OciStmtHandle}} ->
-                            ets:delete(TableId, Ref),
+                    case Stmts of
+                        #{Ref := #{stmt := {PortPid, OciSessnHandle, OciStmtHandle}}} ->
                             case [{{oci_port, statement, PortPid, OciSessnHandle,
                                    OciStmtHandle}, Session}
                                   || #session{ssn = {oci_port, PP, OSessnH}}
@@ -155,7 +155,8 @@ handle_call({close, Pid, Ref}, From, #state{tableId = TableId} = State) ->
                                        closedStmts = Session#session.closedStmts + 1}
                                      | Sessions -- [Session]],
                                     {reply, Statement:close(),
-                                     NewState#state{sessions = sort_sessions(NewSessions)}};
+                                     NewState#state{sessions = sort_sessions(NewSessions),
+                                                    stmts = maps:remove(Ref, Stmts)}};
                                 [] ->
                                     {reply, {error, not_found}, NewState}
                             end;
@@ -185,10 +186,13 @@ handle_call({has_access, Pid}, _From, State) ->
                true -> lists:member(Pid, State#state.shares)
             end
      end, State};
-handle_call({fetch_stmt, Ref}, _From, #state{tableId = TableId} = State) ->
-    {reply, fetch_stmt(TableId, Ref), State};
+handle_call({fetch_stmt, Ref}, _From, #state{stmts = Stmts} = State) ->
+    Resp = case Stmts of
+        #{Ref := #{stmt := Stmt}} -> {ok, Stmt};
+        _ -> {error, not_found}
+    end,
+    {reply, Resp, State};
 handle_call(_Request, _From, State) ->
-    io:format("Request : ~p~n", [_Request]),
     {reply, ok, State}.
 
 handle_cast({kill, #session{
@@ -237,6 +241,13 @@ handle_cast({check, {PortPid, OciSessnHandle, _OciStmtHandle}}, State) ->
                   end
           end),
     {noreply, State};
+handle_cast({add_binds, Ref, Binds}, #state{stmts = Stmts} = State) ->
+    NewStmts =
+    case Stmts of
+        #{Ref := StmtInfo} -> Stmts#{Ref => StmtInfo#{binds => Binds}};
+        _ -> Stmts
+    end,
+    {noreply, State#state{stmts = NewStmts}};
 handle_cast(_Request, State) ->
     {noreply, State}.
 
@@ -285,26 +296,26 @@ handle_info({build_pool, N}, State) ->
 handle_info({build_stmts, MonRef}, #state{sessions = Sessions} = State) when length(Sessions) == 0 ->
     erlang:send_after(?DELAY_RETRY_AFTER_ERROR, self(), {build_stmts, MonRef}),
     {noreply, State};
-handle_info({build_stmts, MonRef}, State) ->
-    OldStmts = ets:select(State#state.tableId, [{#stmt_info{mon_ref = '$1', _ = '_'}, [{'==', '$1', MonRef}], ['$_']}]),
-    {Results, NextState} = lists:mapfoldl(
-        fun(#stmt_info{id = Ref, query = Sql, binds = undefined}, AccState) ->
-            case prep_sql(Ref, Sql, AccState) of
-                {{ok, _}, NewSate} -> {true, NewSate};
-                {{error, _}, NewSate} -> {false, NewSate}
-            end;
-           (#stmt_info{id = Ref, query = Sql, binds = Binds}, AccState) ->
+handle_info({build_stmts, MonRef}, #state{stmts = Stmts} = State) ->
+    NextState = maps:fold(
+        fun(Ref, #{sql := Sql, binds := Binds, mon_ref := SMonRef}, AccState) when SMonRef == MonRef ->
             case prep_sql(Ref, Sql, AccState) of
                 {{ok, _}, NewSate} ->
-                    erlocipool:bind_vars(Binds, {erlocipool, State#state.name, Ref}),
-                    {true, NewSate};
-                {{error, _}, NewSate} -> {false, NewSate}
-            end
-        end, State, OldStmts),
-    case lists:usort(Results) of
-        [true] -> no_op;
-        _ -> erlang:send_after(?DELAY_RETRY_AFTER_ERROR, self(), {build_stmts, MonRef})
-    end,
+                    timer:apply_after(100, erlocipool, bind_vars, [Binds, {erlocipool, self(), Ref}]),
+                    NewSate;
+                {{error, _}, NewSate} ->
+                    erlang:send_after(?DELAY_RETRY_AFTER_ERROR, self(), {build_stmts, MonRef}),
+                    NewSate
+            end;
+           (Ref, #{sql := Sql, mon_ref := SMonRef}, AccState) when SMonRef == MonRef ->
+            case prep_sql(Ref, Sql, AccState) of
+                {{ok, _}, NewSate} -> NewSate;
+                {{error, _}, NewSate} ->
+                    erlang:send_after(?DELAY_RETRY_AFTER_ERROR, self(), {build_stmts, MonRef}),
+                    NewSate
+            end;
+           (Ref, Stmt, AccState) -> io:format("Not down : ~p ~p~n", [Ref, Stmt]), AccState
+    end, State, Stmts),
     {noreply, NextState};
 handle_info({'EXIT', Pid, Reason}, State) ->
     ?DBG("Got Exit", "For ~p Reason : ~p", [Pid, Reason]),
@@ -324,8 +335,7 @@ handle_info({'DOWN', MonRef, process, _OciPortPid, _Reason},
 handle_info(_Info, State) ->
     {noreply, State}.
 
-terminate(_Reason, #state{sessions = Sessions, tableId = TableId}) ->
-    ets:delete(TableId),
+terminate(_Reason, #state{sessions = Sessions}) ->
     [begin
          OciPort = {oci_port, PortPid},
          catch OciPort:close()
@@ -340,12 +350,6 @@ format_status(_Opt, [_PDict, State]) ->
 %% ===================================================================
 %% private
 %% ===================================================================
--spec fetch_stmt(integer(), reference()) -> {ok, tuple()} | {error, not_found}.
-fetch_stmt(TableId, Ref) ->
-    case ets:lookup(TableId, Ref) of
-        [] -> {error, not_found};
-        [#stmt_info{handle = Stmt}] -> {ok, Stmt}
-    end.
 
 kill(Self, PortPid, OciSessnHandle, Sessions) ->
     case [S || #session{ssn={oci_port,PP,OSessnH}} = S <- Sessions,
@@ -419,7 +423,7 @@ pick_session(#state{sessions = Sessions, sessMin = MinSess, sessMax = MaxSess,
 
 -spec prep_sql(Ref :: reference(), Sql :: binary(), State :: #state{}) ->
     {{ok, Statement :: tuple()} | {error, any()}, Sessions :: [#session{}]}.
-prep_sql(Ref, Sql, #state{tableId = TableId} = State) ->
+prep_sql(Ref, Sql, #state{stmts = Stmts} = State) ->
     case pick_session(State) of
         {ok, #session{ssn = {oci_port, _, OciSessionHandle} = OciSsn, monitor = MonRef} = Session,
          NewState} ->
@@ -428,15 +432,14 @@ prep_sql(Ref, Sql, #state{tableId = TableId} = State) ->
                  OciStatementHandle} ->
                     %?DBG("prep_sql", "sql ~p, statement ~p",
                     %[Sql, OciStatementHandle]),
-                    ets:insert(TableId, #stmt_info{id = Ref, query = Sql,
-                                                     mon_ref = MonRef, 
-                                                     handle = {PortPid, OciSessionHandle, OciStatementHandle}}),
                     {{ok, Ref},
                      NewState#state{
                        sessions = sort_sessions(
                                     [Session#session{
                                        openStmts = Session#session.openStmts + 1}
-                                     | NewState#state.sessions -- [Session]])
+                                     | NewState#state.sessions -- [Session]]),
+                       stmts = Stmts#{Ref => #{sql => Sql, mon_ref => MonRef,
+                                               stmt => {PortPid, OciSessionHandle, OciStatementHandle}}}
                       }};
                 Other ->
                     %TODO: Check if there are existing statements

@@ -3,8 +3,6 @@
 -behaviour(application).
 -behaviour(supervisor).
 
--include("erlocipool.hrl").
-
 %% Create/destroy Pool APIs
 -export([new/5, del/1]).
 
@@ -107,6 +105,7 @@ close({?MODULE, PidOrName, Ref}) ->
 % Statement internal APIs
 %
 bind_vars(BindVars, {?MODULE, PidOrName, Ref}) ->
+    gen_server:cast(PidOrName, {add_binds, Ref, BindVars}),
     stmt_op(PidOrName, Ref, bind_vars, [BindVars]).
 lob(LobHandle, Offset, Length, {?MODULE, PidOrName, Ref}) ->
     stmt_op(PidOrName, Ref, lob, [LobHandle, Offset, Length]).
@@ -128,7 +127,7 @@ fetch_rows(Count, {?MODULE, PidOrName, Ref}) ->
 stmt_op(PidOrName, Ref, Op, Args) ->
     case gen_server:call(PidOrName, {fetch_stmt, Ref}) of
         {ok, Stmt} ->
-            case gen_server:call(PidOrName, {stmt, self(), Ref}) of
+            case gen_server:call(PidOrName, {stmt, self(), Stmt}) of
                 {ok, ErlOciStmt} ->
                     case apply(ErlOciStmt, Op, Args) of
                         {error, {OraCode, _}} = Error when is_integer(OraCode) ->
