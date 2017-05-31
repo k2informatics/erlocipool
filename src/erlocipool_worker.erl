@@ -352,7 +352,10 @@ format_status(_Opt, [_PDict, State]) ->
 kill(Self, PortPid, OciSessnHandle, Sessions) ->
     case [S || #session{ssn={oci_port,PP,OSessnH}} = S <- Sessions,
                OSessnH == OciSessnHandle, PP == PortPid] of
-        [S] -> gen_server:cast(Self, {kill, S});
+        [S] -> 
+            gen_server:cast(Self, {kill, S}),
+            #session{monitor = MonRef} = S,
+            Self ! {build_stmts, MonRef};
         _ -> ok
     end.
 
