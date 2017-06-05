@@ -3,13 +3,12 @@
 
 -include("erlocipool.hrl").
 
+-type stmt()  :: #{sql => binary(), binds => list(), stmt => tuple()}.
 -record(session, {ssn, monitor, openStmts = 0, closedStmts = 0}).
 -record(state, {name, type, owner, ociOpts, logFun, tns, usr, passwd,
-                sessMin = 0, sessMax = 0, stmtMax = 0, lastError, upTh = 0,
-                sess_restart_codes = [], shares = [], stmts = #{},
-                sessions = [] :: #session{}, downTh = 0}).
-
-%% stmts = #{make_ref() => #{sql => <<"">>, binds => [], stmt => {oci_port, ...}}, make_ref() => ...}
+                sessMin = 0, sessMax = 0, stmtMax = 0, upTh = 0, downTh = 0,
+                lastError, sess_restart_codes = [], sessions = [] :: #session{}, 
+                shares = [], stmts = #{} :: #{reference() => stmt()}}).
 
 % supervisor interface
 -export([start_link/6]).
