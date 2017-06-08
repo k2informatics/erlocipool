@@ -121,9 +121,6 @@ handle_call({stmt, Pid, Ref}, From, #state{stmts = Stmts} = State) ->
             end
     end;
 handle_call({prep_sql, Pid, Sql}, From, State) ->
-    Ref = erlang:make_ref(),
-    handle_call({prep_sql, Pid, Sql, Ref}, From, State);
-handle_call({prep_sql, Pid, Sql, Ref}, From, State) ->
     case handle_call({has_access, Pid}, From, State) of
         {reply, false, State1} ->
             {reply, {error, private}, State1};
@@ -131,7 +128,7 @@ handle_call({prep_sql, Pid, Sql, Ref}, From, State) ->
             if length(State1#state.sessions) == 0 ->
                    {reply, {error, no_session}, State1};
                true ->
-                   {Result, State2} = prep_sql(Ref, Sql, State1),
+                   {Result, State2} = prep_sql(undefined, Sql, State1),
                    {reply, Result, State2}
             end
     end;
@@ -421,9 +418,9 @@ pick_session(#state{sessions = Sessions, sessMin = MinSess, sessMax = MaxSess,
             {ok, Session, State}
     end.
 
--spec prep_sql(Ref :: reference(), Sql :: binary(), State :: #state{}) ->
+-spec prep_sql(LastRef :: reference() | undefined, Sql :: binary(), State :: #state{}) ->
     {{ok, Statement :: tuple()} | {error, any()}, Sessions :: [#session{}]}.
-prep_sql(Ref, Sql, #state{stmts = Stmts} = State) ->
+prep_sql(LastRef, Sql, #state{stmts = Stmts} = State) ->
     case pick_session(State) of
         {ok, #session{ssn = {oci_port, _, OciSessionHandle} = OciSsn, monitor = MonRef} = Session,
          NewState} ->
@@ -432,6 +429,7 @@ prep_sql(Ref, Sql, #state{stmts = Stmts} = State) ->
                  OciStatementHandle} ->
                     %?DBG("prep_sql", "sql ~p, statement ~p",
                     %[Sql, OciStatementHandle]),
+                    Ref = get_ref(LastRef),
                     {{ok, Ref},
                      NewState#state{
                        sessions = sort_sessions(
@@ -450,9 +448,13 @@ prep_sql(Ref, Sql, #state{stmts = Stmts} = State) ->
                             ?DBG("prep_sql", "sql ~p, statement ~p~n", [Sql, Other]),
                             {{error, Other}, NewState};
                         OtherSessions ->
-                            prep_sql(Ref, Sql, State#state{sessions = OtherSessions})
+                            prep_sql(LastRef, Sql, State#state{sessions = OtherSessions})
                     end
             end;
         {error, Error} ->
             {{error, Error}, State}
     end.
+
+-spec get_ref(undefined | reference()) -> reference().
+get_ref(undefined) -> erlang:make_ref();
+get_ref(Ref) when is_reference(Ref) -> Ref.
