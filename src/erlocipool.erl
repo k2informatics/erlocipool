@@ -92,11 +92,11 @@ has_access(PidOrName) -> gen_server:call(PidOrName, {has_access, self()}).
 % lead to a cleanup if session is dead
 prep_sql(Sql, {?MODULE, PidOrName}) when is_binary(Sql) ->
     case gen_server:call(PidOrName, {prep_sql, self(), Sql}, infinity) of
-        {ok, Ref} ->
-            {ok, {?MODULE, PidOrName, Ref}};
+        {ok, Ref} -> {ok, {?MODULE, PidOrName, Ref}};
         Other -> Other
     end;
-prep_sql(PidOrName, Sql) when is_binary(Sql) -> prep_sql(Sql, {?MODULE, PidOrName}).
+prep_sql(PidOrName, Sql) when is_binary(Sql) ->
+    prep_sql(Sql, {?MODULE, PidOrName}).
 
 close({?MODULE, PidOrName, Ref}) ->
     gen_server:call(PidOrName, {close, self(), Ref}).
@@ -146,6 +146,7 @@ stmt_op(PidOrName, Ref, Op, Args) ->
 loginfo({Level,ModStr,FunStr,Line,MsgStr}) ->
     case Level of
         info ->
-            io:format("[~p] {~s,~s,~p} ~s~n", [Level,ModStr,FunStr,Line,MsgStr]);
+            io:format("[~p] {~s,~s,~p} ~s~n",
+                      [Level,ModStr,FunStr,Line,MsgStr]);
         _ -> ok
     end.
