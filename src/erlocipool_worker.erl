@@ -157,10 +157,10 @@ handle_call({close, Pid, Ref}, From, #state{stmts = Stmts} = State) ->
                                     {reply, Statement:close(),
                                      NewState#state{sessions = sort_sessions(NewSessions),
                                                     stmts = maps:remove(Ref, Stmts)}};
-                                [] ->
-                                    {reply, {error, not_found}, NewState}
+                                _ ->
+                                    {reply, {error, bad_pool_state}, NewState}
                             end;
-                        {error, _} = Error -> {reply, Error, NewState}
+                        _ -> {reply, {error, not_found}, NewState}
                     end
             end
     end;
