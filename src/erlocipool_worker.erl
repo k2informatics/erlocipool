@@ -131,11 +131,11 @@ handle_call({prep_sql, Pid, Sql}, From, State) ->
             {reply, {error, private}, State1};
         {reply, true, State1} ->
             if length(State1#state.sessions) == 0 ->
-                   self() ! {build_pool, State#state.sessMin},
-                   {reply, {error, no_session}, State1};
+                  self() ! {build_pool, State#state.sessMin},
+                  {reply, {error, no_session}, State1};
                true ->
-                   {Result, State2} = prep_sql(undefined, Sql, State1),
-                   {reply, Result, State2}
+                  {Result, State2} = prep_sql(undefined, Sql, State1),
+                  {reply, Result, State2}
             end
     end;
 handle_call({close, Pid, Ref}, From, #state{stmts = Stmts, sessions = Sessions} = State) ->
