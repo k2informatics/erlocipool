@@ -144,7 +144,7 @@ handle_call({close, Pid, Ref}, From, #state{stmts = Stmts} = State) ->
             {reply, {error, private}, NewState};
         {reply, true, NewState} ->
             case NewState#state.sessions of
-                [] -> 
+                [] ->
                     {reply, {error, no_session}, NewState};
                 Sessions ->
                     case Stmts of
@@ -152,22 +152,22 @@ handle_call({close, Pid, Ref}, From, #state{stmts = Stmts} = State) ->
                                             OciStmtHandle}}} ->
                             case [{{oci_port, statement, PortPid,
                                     OciSessnHandle, OciStmtHandle}, Session}
-                                    || #session{ssn = {oci_port, PP, OSessnH}}
-                                        = Session <- Sessions,
-                                        OSessnH == OciSessnHandle,
-                                        PP == PortPid] of
+                                  || #session{ssn = {oci_port, PP, OSessnH}}
+                                     = Session <- Sessions,
+                                     OSessnH == OciSessnHandle,
+                                     PP == PortPid] of
                                 [{Statement, Session}] ->
                                     NewSessions =
                                     [Session#session{
-                                        openStmts =
-                                        Session#session.openStmts - 1,
-                                        closedStmts =
-                                        Session#session.closedStmts + 1}
-                                        | Sessions -- [Session]],
+                                       openStmts =
+                                       Session#session.openStmts - 1,
+                                       closedStmts =
+                                       Session#session.closedStmts + 1}
+                                     | Sessions -- [Session]],
                                     {reply, Statement:close(),
-                                        NewState#state{
-                                        sessions = sort_sessions(NewSessions),
-                                        stmts = maps:remove(Ref, Stmts)}};
+                                     NewState#state{
+                                       sessions = sort_sessions(NewSessions),
+                                       stmts = maps:remove(Ref, Stmts)}};
                                 _ ->
                                     {reply, {error, bad_pool_state}, NewState}
                             end;
