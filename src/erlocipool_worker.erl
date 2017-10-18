@@ -138,36 +138,41 @@ handle_call({prep_sql, Pid, Sql}, From, State) ->
                   {reply, Result, State2}
             end
     end;
-handle_call({close, Pid, Ref}, From, #state{stmts = Stmts, sessions = Sessions} = State) ->
+handle_call({close, Pid, Ref}, From, #state{stmts = Stmts} = State) ->
     case handle_call({has_access, Pid}, From, State) of
         {reply, false, NewState} ->
             {reply, {error, private}, NewState};
         {reply, true, NewState} ->
-            case Stmts of
-                #{Ref := #{stmt := {PortPid, OciSessnHandle,
-                                    OciStmtHandle}}} ->
-                    case [{{oci_port, statement, PortPid,
-                            OciSessnHandle, OciStmtHandle}, Session}
-                            || #session{ssn = {oci_port, PP, OSessnH}}
-                                = Session <- Sessions,
-                                OSessnH == OciSessnHandle,
-                                PP == PortPid] of
-                        [{Statement, Session}] ->
-                            NewSessions =
-                            [Session#session{
-                                openStmts =
-                                Session#session.openStmts - 1,
-                                closedStmts =
-                                Session#session.closedStmts + 1}
-                                | Sessions -- [Session]],
-                            {reply, Statement:close(),
-                                NewState#state{
-                                sessions = sort_sessions(NewSessions),
-                                stmts = maps:remove(Ref, Stmts)}};
-                        _ ->
-                            {reply, {error, bad_pool_state}, NewState}
-                    end;
-                _ -> {reply, {error, not_found}, NewState}
+            case NewState#state.sessions of
+                [] -> 
+                    {reply, {error, no_session}, NewState};
+                Sessions ->
+                    case Stmts of
+                        #{Ref := #{stmt := {PortPid, OciSessnHandle,
+                                            OciStmtHandle}}} ->
+                            case [{{oci_port, statement, PortPid,
+                                    OciSessnHandle, OciStmtHandle}, Session}
+                                    || #session{ssn = {oci_port, PP, OSessnH}}
+                                        = Session <- Sessions,
+                                        OSessnH == OciSessnHandle,
+                                        PP == PortPid] of
+                                [{Statement, Session}] ->
+                                    NewSessions =
+                                    [Session#session{
+                                        openStmts =
+                                        Session#session.openStmts - 1,
+                                        closedStmts =
+                                        Session#session.closedStmts + 1}
+                                        | Sessions -- [Session]],
+                                    {reply, Statement:close(),
+                                        NewState#state{
+                                        sessions = sort_sessions(NewSessions),
+                                        stmts = maps:remove(Ref, Stmts)}};
+                                _ ->
+                                    {reply, {error, bad_pool_state}, NewState}
+                            end;
+                        _ -> {reply, {error, not_found}, NewState}
+                    end
             end
     end;
 handle_call({share, Owner, SharePid}, _From, State) ->
